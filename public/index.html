@@ -16,7 +16,7 @@
     <main class="app-shell">
       <video id="screen" aria-label="Mac screen" autoplay playsinline muted></video>
 
-      <div class="top-bar">
+      <div class="top-bar" id="topBar">
         <div class="status" id="status">
           <span class="status-dot" id="statusDot"></span>
           <span id="statusText">Connecting</span>
@@ -40,8 +40,22 @@
           aria-pressed="false"
           title="Enter landscape"
         ></button>
+        <button
+          class="controls-toggle"
+          id="controlsToggle"
+          type="button"
+          aria-label="Hide controls"
+          title="Hide controls"
+        ></button>
       </div>
 
+      <button
+        class="controls-peek"
+        id="controlsPeek"
+        type="button"
+        aria-label="Show controls"
+        title="Show controls"
+      ></button>
       <div class="monitor-badge" id="monitorBadge" hidden>Monitor</div>
       <div class="ownership" id="ownership" hidden>View only</div>
       <div class="signal-panel" id="signalPanel">

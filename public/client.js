@@ -1,14 +1,20 @@
 const screen = document.querySelector("#screen");
+const appShell = document.querySelector(".app-shell");
+const topBar = document.querySelector("#topBar");
 const statusEl = document.querySelector("#status");
 const statusText = document.querySelector("#statusText");
 const qualitySelect = document.querySelector("#quality");
 const modeButton = document.querySelector("#modeButton");
 const orientationButton = document.querySelector("#orientationButton");
+const controlsToggle = document.querySelector("#controlsToggle");
+const controlsPeek = document.querySelector("#controlsPeek");
 const monitorBadge = document.querySelector("#monitorBadge");
 const ownership = document.querySelector("#ownership");
 const signalPanel = document.querySelector("#signalPanel");
 const signalTitle = document.querySelector("#signalTitle");
 const signalBody = document.querySelector("#signalBody");
+
+const CONTROLS_AUTO_HIDE_MS = 3200;
 
 let socket = null;
 let peer = null;
@@ -16,10 +22,12 @@ let inputChannel = null;
 let reconnectTimer = null;
 let reconnectDelay = 500;
 let signalTimer = null;
+let controlsTimer = null;
 let orientationMessageTimer = null;
 let connected = false;
 let canControl = false;
 let monitorMode = false;
+let controlsCollapsed = false;
 let landscapeSessionActive = false;
 let orientationLockActive = false;
 let currentQuality = qualitySelect.value;
@@ -46,6 +54,41 @@ function setStatus(state, label) {
   statusEl.classList.remove("connected", "disconnected", "warning");
   statusEl.classList.add(state);
   statusText.textContent = label;
+}
+
+function setControlsCollapsed(collapsed) {
+  controlsCollapsed = collapsed;
+  appShell.classList.toggle("controls-collapsed", collapsed);
+  controlsToggle.setAttribute("aria-label", collapsed ? "Show controls" : "Hide controls");
+  controlsToggle.title = collapsed ? "Show controls" : "Hide controls";
+}
+
+function scheduleControlsCollapse(delay = CONTROLS_AUTO_HIDE_MS) {
+  window.clearTimeout(controlsTimer);
+  if (controlsCollapsed) {
+    return;
+  }
+
+  controlsTimer = window.setTimeout(() => {
+    if (topBar.contains(document.activeElement)) {
+      scheduleControlsCollapse(delay);
+      return;
+    }
+    setControlsCollapsed(true);
+  }, delay);
+}
+
+function showControls({ autoHide = true } = {}) {
+  window.clearTimeout(controlsTimer);
+  setControlsCollapsed(false);
+  if (autoHide) {
+    scheduleControlsCollapse();
+  }
+}
+
+function holdControls() {
+  window.clearTimeout(controlsTimer);
+  setControlsCollapsed(false);
 }
 
 function setMonitorMode(enabled) {
@@ -533,6 +576,7 @@ function sendInput(action) {
 
 function handleTouchStart(event) {
   event.preventDefault();
+
   clearLongPress();
   rightClickSent = false;
 
@@ -635,10 +679,12 @@ function handleWheel(event) {
 qualitySelect.addEventListener("change", () => {
   currentQuality = qualitySelect.value;
   sendMessage({ type: "quality", quality: currentQuality });
+  scheduleControlsCollapse(1600);
 });
 
 modeButton.addEventListener("click", () => {
   setMonitorMode(!monitorMode);
+  scheduleControlsCollapse(1600);
 });
 
 orientationButton.addEventListener("click", () => {
@@ -647,6 +693,27 @@ orientationButton.addEventListener("click", () => {
   } else {
     void enterLandscape();
   }
+  scheduleControlsCollapse(1600);
+});
+
+controlsToggle.addEventListener("click", () => {
+  setControlsCollapsed(true);
+});
+
+controlsPeek.addEventListener("click", () => {
+  showControls();
+});
+
+topBar.addEventListener("pointerdown", holdControls);
+topBar.addEventListener("pointerup", () => scheduleControlsCollapse());
+topBar.addEventListener("pointercancel", () => scheduleControlsCollapse());
+topBar.addEventListener("focusin", holdControls);
+topBar.addEventListener("focusout", () => {
+  window.setTimeout(() => {
+    if (!topBar.contains(document.activeElement)) {
+      scheduleControlsCollapse();
+    }
+  });
 });
 
 screen.addEventListener("loadeddata", () => {
@@ -682,4 +749,5 @@ screen.addEventListener("wheel", handleWheel, { passive: false });
 setMonitorMode(false);
 updateOrientationButton();
 updateScreenTransform();
+showControls();
 connect();

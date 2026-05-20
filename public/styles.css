@@ -54,7 +54,7 @@ select {
   right: max(10px, env(safe-area-inset-right));
   z-index: 2;
   display: grid;
-  grid-template-columns: minmax(96px, 1fr) auto auto auto;
+  grid-template-columns: minmax(96px, 1fr) auto auto auto auto;
   gap: 8px;
   align-items: center;
   min-height: 44px;
@@ -64,6 +64,14 @@ select {
   background: rgba(10, 14, 20, 0.78);
   backdrop-filter: blur(16px);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.34);
+  transition: opacity 180ms ease, transform 220ms ease;
+  will-change: opacity, transform;
+}
+
+.app-shell.controls-collapsed .top-bar {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(calc(-100% - max(14px, env(safe-area-inset-top))));
 }
 
 .status {
@@ -168,6 +176,65 @@ select {
   color: #07140d;
 }
 
+.controls-toggle {
+  width: 36px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #f6f8fb;
+  padding: 0;
+}
+
+.controls-toggle::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  border-top: 2px solid currentColor;
+  border-left: 2px solid currentColor;
+  transform: translateY(3px) rotate(45deg);
+}
+
+.controls-peek {
+  position: fixed;
+  z-index: 3;
+  top: max(0px, env(safe-area-inset-top));
+  left: 50%;
+  width: 58px;
+  height: 16px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+  background: rgba(10, 14, 20, 0.72);
+  color: #d8dee8;
+  opacity: 0;
+  padding: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(-18px);
+  transition: opacity 180ms ease, transform 220ms ease;
+  backdrop-filter: blur(14px);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+}
+
+.controls-peek::before {
+  content: "";
+  width: 24px;
+  height: 3px;
+  border-radius: 999px;
+  background: currentColor;
+  opacity: 0.86;
+}
+
+.app-shell.controls-collapsed .controls-peek {
+  opacity: 0.9;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+
 .monitor-badge,
 .ownership {
   position: fixed;
@@ -202,7 +269,8 @@ select {
   z-index: 1;
   left: 50%;
   top: 50%;
-  width: min(420px, calc(100vw - 32px));
+  width: calc(100vw - 32px);
+  max-width: 420px;
   transform: translate(-50%, -50%);
   display: grid;
   gap: 8px;
@@ -234,7 +302,7 @@ select {
 
 @media (max-width: 520px) {
   .top-bar {
-    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-columns: minmax(0, 1fr) auto auto auto;
   }
 
   .quality-picker {
@@ -262,7 +330,7 @@ select {
     left: max(8px, env(safe-area-inset-left));
     right: auto;
     width: min(560px, calc(100vw - 20px - env(safe-area-inset-left) - env(safe-area-inset-right)));
-    grid-template-columns: minmax(96px, 1fr) auto auto auto;
+    grid-template-columns: minmax(96px, 1fr) auto auto auto auto;
     min-height: 40px;
     padding: 4px;
   }
@@ -288,7 +356,8 @@ select {
   }
 
   .mode-button,
-  .orientation-button {
+  .orientation-button,
+  .controls-toggle {
     height: 32px;
   }
 
@@ -297,5 +366,24 @@ select {
     left: auto;
     right: max(8px, env(safe-area-inset-right));
     transform: none;
+  }
+}
+
+.app-shell.controls-collapsed .monitor-badge {
+  top: auto;
+  right: auto;
+  bottom: max(14px, env(safe-area-inset-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.app-shell.controls-collapsed .monitor-badge:not([hidden]) + .ownership {
+  bottom: calc(max(14px, env(safe-area-inset-bottom)) + 42px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .top-bar,
+  .controls-peek {
+    transition: none;
   }
 }
