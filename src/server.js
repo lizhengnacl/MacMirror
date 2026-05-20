@@ -975,7 +975,7 @@ async function handleHttpRequest(state, request, response) {
         "content-type": MIME_TYPES[".svg"],
         "cache-control": "no-store"
       });
-      response.end(renderQrSvg(target));
+      response.end(await renderQrSvg(target));
       return;
     }
     if (url.pathname === "/frame.jpg") {
@@ -1017,13 +1017,13 @@ async function handleHttpRequest(state, request, response) {
   }
 }
 
-function printStartup(state) {
+async function printStartup(state) {
   console.log("");
   console.log("MacMirror is running");
   console.log("");
   console.log(`URL: ${state.accessUrl}`);
   console.log("");
-  console.log(renderQrTerminal(state.accessUrl));
+  console.log(await renderQrTerminal(state.accessUrl));
   console.log("");
   console.log("Open the URL on a phone connected to the same LAN.");
   console.log("If the image is black, allow Screen Recording for this terminal app.");
@@ -1113,7 +1113,7 @@ async function main() {
 
   input.start();
   capture.start();
-  printStartup(state);
+  await printStartup(state);
 
   const shutdown = () => {
     console.log("\nStopping MacMirror...");
