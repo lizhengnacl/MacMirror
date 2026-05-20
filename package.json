@@ -1,0 +1,20 @@
+{
+  "name": "macmirror",
+  "version": "0.1.0",
+  "description": "Local macOS screen mirror and control over a mobile browser.",
+  "type": "module",
+  "bin": {
+    "macmirror": "./src/server.js"
+  },
+  "scripts": {
+    "start": "node ./src/server.js",
+    "check": "node --check ./src/server.js && node --check ./src/qr.js && node --check ./src/h264-rtp.js && node --check ./public/client.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "werift": "^0.23.0"
+  }
+}

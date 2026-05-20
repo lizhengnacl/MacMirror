@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+    <meta name="theme-color" content="#05070a">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="MacMirror">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>MacMirror</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <video id="screen" aria-label="Mac screen" autoplay playsinline muted></video>
+
+      <div class="top-bar">
+        <div class="status" id="status">
+          <span class="status-dot" id="statusDot"></span>
+          <span id="statusText">Connecting</span>
+        </div>
+
+        <label class="quality-picker">
+          <span>Quality</span>
+          <select id="quality">
+            <option value="smooth">Smooth</option>
+            <option value="balanced" selected>Balanced</option>
+            <option value="high">High</option>
+          </select>
+        </label>
+
+        <button class="mode-button" id="modeButton" type="button" aria-pressed="false">Operate</button>
+        <button
+          class="orientation-button"
+          id="orientationButton"
+          type="button"
+          aria-label="Enter landscape"
+          aria-pressed="false"
+          title="Enter landscape"
+        ></button>
+      </div>
+
+      <div class="monitor-badge" id="monitorBadge" hidden>Monitor</div>
+      <div class="ownership" id="ownership" hidden>View only</div>
+      <div class="signal-panel" id="signalPanel">
+        <strong id="signalTitle">Waiting for screen</strong>
+        <span id="signalBody">Connecting to the macOS capture helper.</span>
+      </div>
+    </main>
+
+    <script src="/client.js" type="module"></script>
+  </body>
+</html>
