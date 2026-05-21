@@ -8,6 +8,8 @@
   },
   "scripts": {
     "start": "node ./src/server.js",
+    "build:macos": "./scripts/build-macos-app.sh",
+    "install:macos": "./scripts/install-macos-app.sh",
     "check": "node --check ./src/server.js && node --check ./src/qr.js && node --check ./src/h264-rtp.js && node --check ./public/client.js"
   },
   "engines": {

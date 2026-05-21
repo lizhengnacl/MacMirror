@@ -24,18 +24,23 @@ func postMove(to point: CGPoint) {
 
 func postClick(to point: CGPoint, button: CGMouseButton, down: CGEventType, up: CGEventType) {
     postMove(to: point)
-    CGEvent(
+    let downEvent = CGEvent(
         mouseEventSource: nil,
         mouseType: down,
         mouseCursorPosition: point,
         mouseButton: button
-    )?.post(tap: .cghidEventTap)
-    CGEvent(
+    )
+    downEvent?.setIntegerValueField(.mouseEventClickState, value: 1)
+    downEvent?.post(tap: .cghidEventTap)
+
+    let upEvent = CGEvent(
         mouseEventSource: nil,
         mouseType: up,
         mouseCursorPosition: point,
         mouseButton: button
-    )?.post(tap: .cghidEventTap)
+    )
+    upEvent?.setIntegerValueField(.mouseEventClickState, value: 1)
+    upEvent?.post(tap: .cghidEventTap)
 }
 
 func postScroll(dx: Double, dy: Double) {

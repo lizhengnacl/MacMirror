@@ -15,11 +15,19 @@ const signalTitle = document.querySelector("#signalTitle");
 const signalBody = document.querySelector("#signalBody");
 
 const CONTROLS_AUTO_HIDE_MS = 3200;
+const HEARTBEAT_INTERVAL_MS = 3000;
+const HEARTBEAT_TIMEOUT_MS = 9000;
+const PEER_RECONNECT_DELAY_MS = 1800;
+const MIN_VIEW_SCALE = 1;
+const MAX_VIEW_SCALE = 3;
+const USE_POINTER_EVENTS = Boolean(window.PointerEvent);
 
 let socket = null;
 let peer = null;
 let inputChannel = null;
 let reconnectTimer = null;
+let peerReconnectTimer = null;
+let heartbeatTimer = null;
 let reconnectDelay = 500;
 let signalTimer = null;
 let controlsTimer = null;
@@ -35,11 +43,16 @@ let currentOfferId = 0;
 let webRtcState = "new";
 let iceState = "new";
 let dataChannelState = "connecting";
+let lastPongAt = 0;
 let frameMeta = null;
 let firstFrameReceived = false;
 let connectedAt = 0;
 let viewScale = 1;
+let viewOffsetX = 0;
+let viewOffsetY = 0;
 let gesture = null;
+let mouseGesture = null;
+let activePointers = new Map();
 let longPressTimer = null;
 let rightClickSent = false;
 let lastMoveSentAt = 0;
@@ -221,7 +234,7 @@ function handleFullscreenChange() {
 }
 
 function permissionBody(message) {
-  return message || "Grant Screen Recording permission to the terminal app that started MacMirror, then restart the service.";
+  return message || "Grant Screen Recording permission to MacMirror or the terminal app that started it, then restart the service.";
 }
 
 function updateSignal() {
@@ -266,15 +279,24 @@ function updateSignal() {
 
 function connect() {
   window.clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  window.clearTimeout(peerReconnectTimer);
+  peerReconnectTimer = null;
   window.clearInterval(signalTimer);
+  window.clearInterval(heartbeatTimer);
   closePeer();
 
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+  const nextSocket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+  socket = nextSocket;
 
-  socket.addEventListener("open", () => {
+  nextSocket.addEventListener("open", () => {
+    if (socket !== nextSocket) {
+      return;
+    }
     connected = true;
     connectedAt = performance.now();
+    lastPongAt = performance.now();
     firstFrameReceived = false;
     webRtcState = "new";
     iceState = "new";
@@ -284,32 +306,112 @@ function connect() {
     sendMessage({ type: "hello", quality: currentQuality });
     updateOwnership();
     updateSignal();
+    startHeartbeat();
     signalTimer = window.setInterval(updateSignal, 800);
   });
 
-  socket.addEventListener("message", (event) => {
+  nextSocket.addEventListener("message", (event) => {
+    if (socket !== nextSocket) {
+      return;
+    }
     if (typeof event.data === "string") {
       void handleServerMessage(event.data);
     }
   });
 
-  socket.addEventListener("close", scheduleReconnect);
-  socket.addEventListener("error", scheduleReconnect);
+  nextSocket.addEventListener("close", () => {
+    if (socket === nextSocket) {
+      scheduleReconnect();
+    }
+  });
+  nextSocket.addEventListener("error", () => {
+    if (socket === nextSocket) {
+      scheduleReconnect();
+    }
+  });
 }
 
-function scheduleReconnect() {
-  if (!connected && reconnectTimer) {
+function scheduleReconnect({ immediate = false } = {}) {
+  if (!connected && reconnectTimer && !immediate) {
     return;
   }
   connected = false;
   canControl = false;
+  webRtcState = "closed";
+  iceState = "closed";
   setStatus("disconnected", "Reconnecting");
   updateOwnership();
   updateSignal();
+  window.clearTimeout(peerReconnectTimer);
+  peerReconnectTimer = null;
+  window.clearInterval(heartbeatTimer);
+  heartbeatTimer = null;
   closePeer();
   window.clearTimeout(reconnectTimer);
-  reconnectTimer = window.setTimeout(connect, reconnectDelay);
-  reconnectDelay = Math.min(5000, Math.floor(reconnectDelay * 1.6));
+  reconnectTimer = window.setTimeout(connect, immediate ? 0 : reconnectDelay);
+  if (!immediate) {
+    reconnectDelay = Math.min(5000, Math.floor(reconnectDelay * 1.6));
+  }
+}
+
+function startHeartbeat() {
+  window.clearInterval(heartbeatTimer);
+  heartbeatTimer = window.setInterval(() => {
+    if (socket?.readyState !== WebSocket.OPEN) {
+      scheduleReconnect();
+      return;
+    }
+
+    const now = performance.now();
+    if (now - lastPongAt > HEARTBEAT_TIMEOUT_MS) {
+      try {
+        socket.close();
+      } catch {
+        // The reconnect timer below is the authoritative recovery path.
+      }
+      scheduleReconnect({ immediate: true });
+      return;
+    }
+
+    sendMessage({
+      type: "ping",
+      at: Date.now()
+    });
+  }, HEARTBEAT_INTERVAL_MS);
+}
+
+function restartPeer() {
+  window.clearTimeout(peerReconnectTimer);
+  peerReconnectTimer = null;
+
+  if (!connected || socket?.readyState !== WebSocket.OPEN) {
+    scheduleReconnect({ immediate: true });
+    return;
+  }
+
+  firstFrameReceived = false;
+  connectedAt = performance.now();
+  webRtcState = "new";
+  iceState = "new";
+  dataChannelState = "connecting";
+  closePeer();
+  setStatus("warning", "Reconnecting");
+  setSignal("Reconnecting WebRTC", "Restoring the screen stream.");
+  sendMessage({
+    type: "hello",
+    quality: currentQuality,
+    reconnect: true
+  });
+}
+
+function schedulePeerReconnect(reason, delay = PEER_RECONNECT_DELAY_MS) {
+  if (!connected || peerReconnectTimer) {
+    return;
+  }
+
+  setStatus("warning", "Reconnecting");
+  setSignal("Reconnecting WebRTC", reason);
+  peerReconnectTimer = window.setTimeout(restartPeer, delay);
 }
 
 function sendMessage(message) {
@@ -344,6 +446,8 @@ async function handleServerMessage(raw) {
     updateOwnership();
   } else if (message.type === "quality") {
     syncQuality(message.quality);
+  } else if (message.type === "pong") {
+    lastPongAt = performance.now();
   } else if (message.type === "meta") {
     frameMeta = message;
     captureStatus = {
@@ -417,12 +521,20 @@ async function acceptOffer(offer) {
   });
 
   pc.addEventListener("connectionstatechange", () => {
+    if (peer !== pc) {
+      return;
+    }
     webRtcState = pc.connectionState;
+    handlePeerConnectionState();
     updateSignal();
   });
 
   pc.addEventListener("iceconnectionstatechange", () => {
+    if (peer !== pc) {
+      return;
+    }
     iceState = pc.iceConnectionState;
+    handlePeerConnectionState();
     updateSignal();
   });
 
@@ -440,6 +552,32 @@ async function acceptOffer(offer) {
     answer: pc.localDescription
   });
   updateSignal();
+}
+
+function handlePeerConnectionState() {
+  if (
+    webRtcState === "connected" ||
+    iceState === "connected" ||
+    iceState === "completed"
+  ) {
+    window.clearTimeout(peerReconnectTimer);
+    peerReconnectTimer = null;
+    return;
+  }
+
+  if (webRtcState === "failed" || iceState === "failed") {
+    schedulePeerReconnect("The WebRTC connection failed. Reconnecting now.", 0);
+    return;
+  }
+
+  if (webRtcState === "closed" || iceState === "closed") {
+    schedulePeerReconnect("The WebRTC connection closed. Reconnecting now.", 0);
+    return;
+  }
+
+  if (webRtcState === "disconnected" || iceState === "disconnected") {
+    schedulePeerReconnect("The WebRTC connection was interrupted. Trying to recover.");
+  }
 }
 
 async function addRemoteIce(candidate) {
@@ -485,42 +623,119 @@ function attachInputChannel(channel) {
   });
   channel.addEventListener("close", () => {
     dataChannelState = "closed";
+    if (connected && peer) {
+      schedulePeerReconnect("The control channel closed. Restoring the session.");
+    }
     updateSignal();
   });
   channel.addEventListener("error", () => {
     dataChannelState = "closed";
+    if (connected && peer) {
+      schedulePeerReconnect("The control channel hit an error. Restoring the session.");
+    }
     updateSignal();
   });
 }
 
 function closePeer() {
-  if (inputChannel) {
+  const channel = inputChannel;
+  const currentPeer = peer;
+  inputChannel = null;
+  peer = null;
+
+  if (channel) {
     try {
-      inputChannel.close();
+      channel.close();
     } catch {
       // Best-effort cleanup.
     }
   }
-  inputChannel = null;
   dataChannelState = "connecting";
 
-  if (peer) {
+  if (currentPeer) {
     try {
-      peer.close();
+      currentPeer.close();
     } catch {
       // Best-effort cleanup.
     }
   }
-  peer = null;
   screen.srcObject = null;
 }
 
+function getScreenLayoutRect() {
+  const width = screen.clientWidth || window.innerWidth;
+  const height = screen.clientHeight || window.innerHeight;
+
+  return {
+    left: (window.innerWidth - width) / 2,
+    top: (window.innerHeight - height) / 2,
+    width,
+    height
+  };
+}
+
+function clampViewTransform() {
+  if (viewScale <= MIN_VIEW_SCALE) {
+    viewScale = MIN_VIEW_SCALE;
+    viewOffsetX = 0;
+    viewOffsetY = 0;
+    return;
+  }
+
+  const rect = getScreenLayoutRect();
+  const minX = rect.width * (1 - viewScale);
+  const minY = rect.height * (1 - viewScale);
+  viewOffsetX = Math.min(0, Math.max(minX, viewOffsetX));
+  viewOffsetY = Math.min(0, Math.max(minY, viewOffsetY));
+}
+
 function updateScreenTransform() {
-  screen.style.transform = `scale(${viewScale})`;
+  clampViewTransform();
+  screen.style.transform = `matrix(${viewScale}, 0, 0, ${viewScale}, ${viewOffsetX}, ${viewOffsetY})`;
+}
+
+function panViewBy(deltaX, deltaY) {
+  if (viewScale <= MIN_VIEW_SCALE) {
+    return;
+  }
+
+  viewOffsetX += deltaX;
+  viewOffsetY += deltaY;
+  updateScreenTransform();
+}
+
+function localPointFromClient(clientX, clientY) {
+  const rect = getScreenLayoutRect();
+  return {
+    x: Math.min(rect.width, Math.max(0, clientX - rect.left)),
+    y: Math.min(rect.height, Math.max(0, clientY - rect.top))
+  };
+}
+
+function zoomAtClientPoint(point, nextScale) {
+  const previousScale = viewScale;
+  const targetScale = Math.min(MAX_VIEW_SCALE, Math.max(MIN_VIEW_SCALE, nextScale));
+
+  if (Math.abs(targetScale - previousScale) < 0.001) {
+    return;
+  }
+
+  const focal = localPointFromClient(point.clientX, point.clientY);
+  const scaleRatio = targetScale / previousScale;
+  viewOffsetX = focal.x - (focal.x - viewOffsetX) * scaleRatio;
+  viewOffsetY = focal.y - (focal.y - viewOffsetY) * scaleRatio;
+  viewScale = targetScale;
+  updateScreenTransform();
 }
 
 function getVideoFit() {
-  const rect = screen.getBoundingClientRect();
+  const layoutRect = getScreenLayoutRect();
+  const rect = {
+    left: layoutRect.left + viewOffsetX,
+    top: layoutRect.top + viewOffsetY,
+    width: layoutRect.width * viewScale,
+    height: layoutRect.height * viewScale
+  };
   const sourceWidth = frameMeta?.frameWidth || screen.videoWidth || 16;
   const sourceHeight = frameMeta?.frameHeight || screen.videoHeight || 9;
   const scale = Math.min(rect.width / sourceWidth, rect.height / sourceHeight);
@@ -637,16 +852,13 @@ function handleTouchMove(event) {
       return;
     }
 
-    const nextDistance = Math.max(16, distance(first, second));
-    const scale = nextDistance / Math.max(16, gesture.startDistance);
-    viewScale = Math.min(3, Math.max(1, gesture.startScale * scale));
-    updateScreenTransform();
-
     const dy = middle.clientY - gesture.lastCenter.clientY;
     const dx = middle.clientX - gesture.lastCenter.clientX;
-    if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
-      sendInput({ action: "scroll", dx: dx * -2, dy: dy * -2 });
-    }
+    const nextDistance = Math.max(16, distance(first, second));
+    const scale = nextDistance / Math.max(16, gesture.startDistance);
+    zoomAtClientPoint(middle, gesture.startScale * scale);
+    panViewBy(dx, dy);
+
     gesture.lastCenter = middle;
   }
 }
@@ -667,12 +879,263 @@ function handleTouchEnd(event) {
   }
 }
 
+function firstTwoActivePointers() {
+  const pointers = activePointers.values();
+  const first = pointers.next().value;
+  const second = pointers.next().value;
+  return [first, second];
+}
+
+function beginPointerTap(pointerId, point) {
+  clearLongPress();
+  rightClickSent = false;
+  gesture = {
+    type: "pointer",
+    pointerId,
+    start: point,
+    last: point,
+    startTime: performance.now()
+  };
+  longPressTimer = window.setTimeout(() => {
+    if (gesture?.type !== "pointer" || gesture.pointerId !== pointerId) {
+      return;
+    }
+    rightClickSent = true;
+    sendInput({ action: "rightClick", x: gesture.last.x, y: gesture.last.y });
+  }, 620);
+}
+
+function beginPointerPinch() {
+  clearLongPress();
+  const [first, second] = firstTwoActivePointers();
+  if (!first || !second) {
+    return;
+  }
+  gesture = {
+    type: "pinch",
+    startDistance: distance(first, second),
+    startScale: viewScale,
+    lastCenter: center(first, second)
+  };
+}
+
+function updatePointerPinch() {
+  const [first, second] = firstTwoActivePointers();
+  if (!first || !second) {
+    return;
+  }
+  const middle = center(first, second);
+
+  if (gesture?.type !== "pinch") {
+    beginPointerPinch();
+    return;
+  }
+
+  const dy = middle.clientY - gesture.lastCenter.clientY;
+  const dx = middle.clientX - gesture.lastCenter.clientX;
+  const nextDistance = Math.max(16, distance(first, second));
+  const scale = nextDistance / Math.max(16, gesture.startDistance);
+  zoomAtClientPoint(middle, gesture.startScale * scale);
+  panViewBy(dx, dy);
+
+  gesture.lastCenter = middle;
+}
+
+function handlePointerDown(event) {
+  if (event.pointerType === "mouse") {
+    handleMouseDown(event);
+    return;
+  }
+
+  event.preventDefault();
+  const point = eventPoint(event);
+  activePointers.set(event.pointerId, point);
+  screen.setPointerCapture?.(event.pointerId);
+
+  if (activePointers.size === 1) {
+    beginPointerTap(event.pointerId, point);
+  } else if (activePointers.size === 2) {
+    beginPointerPinch();
+  } else {
+    clearLongPress();
+  }
+}
+
+function handlePointerMove(event) {
+  if (event.pointerType === "mouse") {
+    handleMouseMove(event);
+    return;
+  }
+
+  if (!activePointers.has(event.pointerId)) {
+    return;
+  }
+
+  event.preventDefault();
+  const point = eventPoint(event);
+  activePointers.set(event.pointerId, point);
+
+  if (activePointers.size === 1 && gesture?.type === "pointer" && gesture.pointerId === event.pointerId) {
+    const moved = distance(gesture.start, point);
+    if (moved > 10) {
+      clearLongPress();
+    }
+
+    const now = performance.now();
+    if (now - lastMoveSentAt > 24) {
+      sendInput({ action: "move", x: point.x, y: point.y });
+      lastMoveSentAt = now;
+    }
+    gesture.last = point;
+  } else if (activePointers.size >= 2) {
+    clearLongPress();
+    updatePointerPinch();
+  }
+}
+
+function finishPointer(event, { canceled = false } = {}) {
+  if (event.pointerType === "mouse") {
+    if (canceled) {
+      handleMouseCancel(event);
+    } else {
+      handleMouseUp(event);
+    }
+    return;
+  }
+
+  if (!activePointers.has(event.pointerId)) {
+    return;
+  }
+
+  event.preventDefault();
+  const point = eventPoint(event);
+
+  if (!canceled && gesture?.type === "pointer" && gesture.pointerId === event.pointerId && activePointers.size === 1) {
+    gesture.last = point;
+    const duration = performance.now() - gesture.startTime;
+    const moved = distance(gesture.start, gesture.last);
+    if (!rightClickSent && duration < 520 && moved < 12) {
+      sendInput({ action: "click", x: point.x, y: point.y });
+    }
+  }
+
+  activePointers.delete(event.pointerId);
+  clearLongPress();
+  screen.releasePointerCapture?.(event.pointerId);
+
+  if (activePointers.size === 0) {
+    gesture = null;
+    return;
+  }
+
+  if (gesture?.type === "pinch" && activePointers.size >= 2) {
+    beginPointerPinch();
+  }
+}
+
+function handlePointerUp(event) {
+  finishPointer(event);
+}
+
+function handlePointerCancel(event) {
+  finishPointer(event, { canceled: true });
+}
+
+function handleMouseDown(event) {
+  if (event.button === 2) {
+    event.preventDefault();
+    const point = eventPoint(event);
+    sendInput({ action: "rightClick", x: point.x, y: point.y });
+    return;
+  }
+
+  if (event.button !== 0) {
+    return;
+  }
+
+  event.preventDefault();
+  const point = eventPoint(event);
+  mouseGesture = {
+    start: point,
+    last: point,
+    startTime: performance.now()
+  };
+  screen.setPointerCapture?.(event.pointerId);
+}
+
+function handleMouseMove(event) {
+  if (!mouseGesture) {
+    return;
+  }
+
+  event.preventDefault();
+  const point = eventPoint(event);
+  const now = performance.now();
+  if (now - lastMoveSentAt > 24) {
+    sendInput({ action: "move", x: point.x, y: point.y });
+    lastMoveSentAt = now;
+  }
+  mouseGesture.last = point;
+}
+
+function handleMouseUp(event) {
+  if (!mouseGesture || event.button !== 0) {
+    return;
+  }
+
+  event.preventDefault();
+  const point = eventPoint(event);
+  mouseGesture.last = point;
+  const moved = distance(mouseGesture.start, mouseGesture.last);
+  if (moved < 12) {
+    sendInput({ action: "click", x: point.x, y: point.y });
+  }
+  mouseGesture = null;
+  screen.releasePointerCapture?.(event.pointerId);
+}
+
+function handleMouseCancel(event) {
+  mouseGesture = null;
+  if (event.pointerId !== undefined) {
+    screen.releasePointerCapture?.(event.pointerId);
+  }
+}
+
 function handleWheel(event) {
   event.preventDefault();
   sendInput({
     action: "scroll",
     dx: event.deltaX * -1,
     dy: event.deltaY * -1
+  });
+}
+
+function recoverActiveSession() {
+  if (document.hidden) {
+    return;
+  }
+
+  if (!connected || socket?.readyState !== WebSocket.OPEN) {
+    scheduleReconnect({ immediate: true });
+    return;
+  }
+
+  if (
+    !peer ||
+    webRtcState === "failed" ||
+    webRtcState === "disconnected" ||
+    webRtcState === "closed" ||
+    iceState === "failed" ||
+    iceState === "disconnected" ||
+    iceState === "closed"
+  ) {
+    restartPeer();
+    return;
+  }
+
+  sendMessage({
+    type: "ping",
+    at: Date.now()
   });
 }
 
@@ -734,16 +1197,31 @@ window.addEventListener("orientationchange", () => {
   updateOrientationButton();
   updateScreenTransform();
 });
+window.addEventListener("online", recoverActiveSession);
+window.addEventListener("offline", () => {
+  setStatus("disconnected", "Offline");
+  setSignal("Network offline", "MacMirror will reconnect when the browser is back online.");
+});
+window.addEventListener("pageshow", recoverActiveSession);
 window.screen?.orientation?.addEventListener?.("change", () => {
   updateOrientationButton();
   updateScreenTransform();
 });
 document.addEventListener("fullscreenchange", handleFullscreenChange);
 document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
-screen.addEventListener("touchstart", handleTouchStart, { passive: false });
-screen.addEventListener("touchmove", handleTouchMove, { passive: false });
-screen.addEventListener("touchend", handleTouchEnd, { passive: false });
-screen.addEventListener("touchcancel", handleTouchEnd, { passive: false });
+document.addEventListener("visibilitychange", recoverActiveSession);
+if (USE_POINTER_EVENTS) {
+  screen.addEventListener("pointerdown", handlePointerDown);
+  screen.addEventListener("pointermove", handlePointerMove);
+  screen.addEventListener("pointerup", handlePointerUp);
+  screen.addEventListener("pointercancel", handlePointerCancel);
+} else {
+  screen.addEventListener("touchstart", handleTouchStart, { passive: false });
+  screen.addEventListener("touchmove", handleTouchMove, { passive: false });
+  screen.addEventListener("touchend", handleTouchEnd, { passive: false });
+  screen.addEventListener("touchcancel", handleTouchEnd, { passive: false });
+}
+screen.addEventListener("contextmenu", (event) => event.preventDefault());
 screen.addEventListener("wheel", handleWheel, { passive: false });
 
 setMonitorMode(false);

@@ -17,9 +17,18 @@ const ROOT_DIR = path.resolve(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
 const CAPTURE_SCRIPT = path.join(ROOT_DIR, "native", "MacMirrorH264Capture.swift");
 const INPUT_SCRIPT = path.join(ROOT_DIR, "native", "MacMirrorInput.swift");
-const NATIVE_BUILD_DIR = path.join(ROOT_DIR, ".macmirror", "bin");
-const CAPTURE_BINARY = path.join(NATIVE_BUILD_DIR, "MacMirrorH264Capture");
-const INPUT_BINARY = path.join(NATIVE_BUILD_DIR, "MacMirrorInput");
+const CAPTURE_BINARY_CONFIGURED = Boolean(process.env.MACMIRROR_CAPTURE_BINARY);
+const INPUT_BINARY_CONFIGURED = Boolean(process.env.MACMIRROR_INPUT_BINARY);
+const NATIVE_BUILD_DIR = process.env.MACMIRROR_BUILD_DIR
+  ? path.resolve(process.env.MACMIRROR_BUILD_DIR)
+  : path.join(ROOT_DIR, ".macmirror", "bin");
+const CAPTURE_BINARY = CAPTURE_BINARY_CONFIGURED
+  ? path.resolve(process.env.MACMIRROR_CAPTURE_BINARY)
+  : path.join(NATIVE_BUILD_DIR, "MacMirrorH264Capture");
+const INPUT_BINARY = INPUT_BINARY_CONFIGURED
+  ? path.resolve(process.env.MACMIRROR_INPUT_BINARY)
+  : path.join(NATIVE_BUILD_DIR, "MacMirrorInput");
+const PERMISSION_TARGET = process.env.MACMIRROR_PERMISSION_TARGET || "the terminal app that started MacMirror";
 
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const VALID_QUALITIES = new Set(["smooth", "balanced", "high"]);
@@ -30,6 +39,8 @@ const QUALITY_PROFILES = {
 };
 const WEBRTC_INPUT_CHANNEL = "input";
 const H264_FMTP = "profile-level-id=42c01f;packetization-mode=1;level-asymmetry-allowed=1";
+const CLIENT_TIMEOUT_MS = 12_000;
+const CLIENT_SWEEP_INTERVAL_MS = 3_000;
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -50,6 +61,16 @@ function needsBuild(source, output) {
 }
 
 function buildNativeHelper(source, output) {
+  if (
+    (CAPTURE_BINARY_CONFIGURED && output === CAPTURE_BINARY) ||
+    (INPUT_BINARY_CONFIGURED && output === INPUT_BINARY)
+  ) {
+    if (!fsSync.existsSync(output)) {
+      throw new Error(`Configured native helper does not exist: ${output}`);
+    }
+    return;
+  }
+
   if (!needsBuild(source, output)) {
     return;
   }
@@ -813,6 +834,18 @@ function assignController(state) {
   state.controllerId = first.done ? null : first.value;
 }
 
+function closeStaleClients(state) {
+  const now = Date.now();
+  for (const client of state.clients.values()) {
+    if (now - client.lastSeenAt <= CLIENT_TIMEOUT_MS) {
+      continue;
+    }
+
+    console.log(`[clients] timing out stale client ${client.id}`);
+    client.socket.destroy();
+  }
+}
+
 async function handleClientMessage(state, input, capture, client, rawMessage) {
   let message;
   try {
@@ -828,6 +861,15 @@ async function handleClientMessage(state, input, capture, client, rawMessage) {
     }
     await startWebRtcPeer(state, input, capture, client);
     broadcastStatus(state);
+    return;
+  }
+
+  if (message.type === "ping") {
+    sendText(client, {
+      type: "pong",
+      at: message.at ?? null,
+      serverTime: Date.now()
+    });
     return;
   }
 
@@ -893,6 +935,7 @@ function handleUpgrade(state, input, capture, request, socket) {
     id: state.nextClientId,
     socket,
     buffer: Buffer.alloc(0),
+    lastSeenAt: Date.now(),
     webRtc: null,
     inputChannel: null
   };
@@ -920,6 +963,7 @@ function handleUpgrade(state, input, capture, request, socket) {
 
   socket.on("data", (chunk) => {
     parseClientFrames(client, chunk, (message) => {
+      client.lastSeenAt = Date.now();
       void handleClientMessage(state, input, capture, client, message).catch((error) => {
         console.error(`[client ${client.id}] ${error instanceof Error ? error.message : String(error)}`);
         sendText(client, {
@@ -1023,11 +1067,13 @@ async function printStartup(state) {
   console.log("");
   console.log(`URL: ${state.accessUrl}`);
   console.log("");
-  console.log(await renderQrTerminal(state.accessUrl));
-  console.log("");
+  if (process.env.MACMIRROR_NO_TERMINAL_QR !== "1") {
+    console.log(await renderQrTerminal(state.accessUrl));
+    console.log("");
+  }
   console.log("Open the URL on a phone connected to the same LAN.");
-  console.log("If the image is black, allow Screen Recording for this terminal app.");
-  console.log("If control does not work, allow Accessibility for this terminal app.");
+  console.log(`If the image is black, allow Screen Recording for ${PERMISSION_TARGET}.`);
+  console.log(`If control does not work, allow Accessibility for ${PERMISSION_TARGET}.`);
   console.log("Press Ctrl+C to stop.");
   console.log("");
 }
@@ -1068,7 +1114,7 @@ async function main() {
         ...state.capture,
         state: meta.blankFrame ? "warning" : "running",
         message: meta.blankFrame
-          ? "The capture helper is receiving blank frames. Grant Screen Recording permission to the terminal app, then restart MacMirror."
+          ? `The capture helper is receiving blank frames. Grant Screen Recording permission to ${PERMISSION_TARGET}, then restart MacMirror.`
           : "Capture helper is receiving screen frames.",
         hasFrame: true,
         frameCount: state.capture.frameCount + 1,
@@ -1111,12 +1157,16 @@ async function main() {
   const publicHost = publicHostForUrl(host);
   state.accessUrl = `http://${publicHost}:${port}`;
 
+  await printStartup(state);
   input.start();
   capture.start();
-  await printStartup(state);
+  const staleClientTimer = setInterval(() => {
+    closeStaleClients(state);
+  }, CLIENT_SWEEP_INTERVAL_MS);
 
   const shutdown = () => {
     console.log("\nStopping MacMirror...");
+    clearInterval(staleClientTimer);
     capture.stop();
     input.stop();
     for (const client of state.clients.values()) {

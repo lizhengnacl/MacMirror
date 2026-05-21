@@ -393,8 +393,11 @@ final class ScreenCaptureOutput: NSObject, SCStreamOutput {
 @available(macOS 12.3, *)
 func startCapture(options: CaptureOptions) async throws {
     if !CGPreflightScreenCaptureAccess() {
-        FileHandle.standardError.write(Data("Screen Recording permission is not granted. Approve the macOS prompt, then restart MacMirror if frames stay black.\n".utf8))
-        _ = CGRequestScreenCaptureAccess()
+        let shouldRequestPermission = ProcessInfo.processInfo.environment["MACMIRROR_REQUEST_SCREEN_CAPTURE_PERMISSION"] != "0"
+        FileHandle.standardError.write(Data("Screen Recording permission is not granted. Approve Screen Recording for MacMirror, then restart MacMirror if frames stay black.\n".utf8))
+        if shouldRequestPermission {
+            _ = CGRequestScreenCaptureAccess()
+        }
     }
 
     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
