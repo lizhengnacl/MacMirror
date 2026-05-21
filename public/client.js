@@ -20,7 +20,13 @@ const HEARTBEAT_TIMEOUT_MS = 9000;
 const PEER_RECONNECT_DELAY_MS = 1800;
 const MIN_VIEW_SCALE = 1;
 const MAX_VIEW_SCALE = 3;
+const TAP_MAX_DURATION_MS = 650;
+const TAP_MAX_MOVE_PX = 14;
+const PAN_START_MOVE_PX = 14;
+const LONG_PRESS_MS = 620;
+const MOVE_SEND_INTERVAL_MS = 24;
 const USE_POINTER_EVENTS = Boolean(window.PointerEvent);
+const USE_TOUCH_EVENTS = "ontouchstart" in window;
 
 let socket = null;
 let peer = null;
@@ -729,13 +735,7 @@ function zoomAtClientPoint(point, nextScale) {
 }
 
 function getVideoFit() {
-  const layoutRect = getScreenLayoutRect();
-  const rect = {
-    left: layoutRect.left + viewOffsetX,
-    top: layoutRect.top + viewOffsetY,
-    width: layoutRect.width * viewScale,
-    height: layoutRect.height * viewScale
-  };
+  const rect = screen.getBoundingClientRect();
   const sourceWidth = frameMeta?.frameWidth || screen.videoWidth || 16;
   const sourceHeight = frameMeta?.frameHeight || screen.videoHeight || 9;
   const scale = Math.min(rect.width / sourceWidth, rect.height / sourceHeight);
@@ -768,6 +768,71 @@ function center(left, right) {
     clientX: (left.clientX + right.clientX) / 2,
     clientY: (left.clientY + right.clientY) / 2
   };
+}
+
+function viewportCanPan() {
+  return viewScale > MIN_VIEW_SCALE;
+}
+
+function updateSinglePointerGesture(point, pointerId = null) {
+  if (gesture?.type !== "pointer") {
+    return;
+  }
+  if (pointerId !== null && gesture.pointerId !== pointerId) {
+    return;
+  }
+
+  const moved = distance(gesture.start, point);
+  if (moved > TAP_MAX_MOVE_PX) {
+    clearLongPress();
+  }
+
+  if (viewportCanPan()) {
+    if (moved >= PAN_START_MOVE_PX) {
+      const previous = gesture.last;
+      gesture.type = "pan";
+      panViewBy(point.clientX - previous.clientX, point.clientY - previous.clientY);
+      gesture.last = point;
+    } else {
+      gesture.last = point;
+    }
+    return;
+  }
+
+  const now = performance.now();
+  if (now - lastMoveSentAt > MOVE_SEND_INTERVAL_MS) {
+    sendInput({ action: "move", x: point.x, y: point.y });
+    lastMoveSentAt = now;
+  }
+  gesture.last = point;
+}
+
+function updateViewportPan(point, pointerId = null) {
+  if (gesture?.type !== "pan") {
+    return;
+  }
+  if (pointerId !== null && gesture.pointerId !== pointerId) {
+    return;
+  }
+
+  panViewBy(point.clientX - gesture.last.clientX, point.clientY - gesture.last.clientY);
+  gesture.last = point;
+}
+
+function finishSinglePointerGesture(point, pointerId = null) {
+  if (gesture?.type !== "pointer") {
+    return;
+  }
+  if (pointerId !== null && gesture.pointerId !== pointerId) {
+    return;
+  }
+
+  gesture.last = point;
+  const duration = performance.now() - gesture.startTime;
+  const moved = distance(gesture.start, gesture.last);
+  if (!rightClickSent && duration < TAP_MAX_DURATION_MS && moved < TAP_MAX_MOVE_PX) {
+    sendInput({ action: "click", x: point.x, y: point.y });
+  }
 }
 
 function clearLongPress() {
@@ -804,9 +869,12 @@ function handleTouchStart(event) {
       startTime: performance.now()
     };
     longPressTimer = window.setTimeout(() => {
+      if (gesture?.type !== "pointer") {
+        return;
+      }
       rightClickSent = true;
-      sendInput({ action: "rightClick", x: point.x, y: point.y });
-    }, 620);
+      sendInput({ action: "rightClick", x: gesture.last.x, y: gesture.last.y });
+    }, LONG_PRESS_MS);
   } else if (event.touches.length === 2) {
     const first = eventPoint(event.touches[0]);
     const second = eventPoint(event.touches[1]);
@@ -825,17 +893,9 @@ function handleTouchMove(event) {
 
   if (event.touches.length === 1 && gesture?.type === "pointer") {
     const point = eventPoint(event.touches[0]);
-    const moved = distance(gesture.start, point);
-    if (moved > 10) {
-      clearLongPress();
-    }
-
-    const now = performance.now();
-    if (now - lastMoveSentAt > 24) {
-      sendInput({ action: "move", x: point.x, y: point.y });
-      lastMoveSentAt = now;
-    }
-    gesture.last = point;
+    updateSinglePointerGesture(point);
+  } else if (event.touches.length === 1 && gesture?.type === "pan") {
+    updateViewportPan(eventPoint(event.touches[0]));
   } else if (event.touches.length === 2) {
     clearLongPress();
     const first = eventPoint(event.touches[0]);
@@ -868,11 +928,8 @@ function handleTouchEnd(event) {
   clearLongPress();
 
   if (gesture?.type === "pointer" && event.touches.length === 0) {
-    const duration = performance.now() - gesture.startTime;
-    const moved = distance(gesture.start, gesture.last);
-    if (!rightClickSent && duration < 520 && moved < 12) {
-      sendInput({ action: "click", x: gesture.last.x, y: gesture.last.y });
-    }
+    const point = event.changedTouches[0] ? eventPoint(event.changedTouches[0]) : gesture.last;
+    finishSinglePointerGesture(point);
     gesture = null;
   } else if (event.touches.length === 0) {
     gesture = null;
@@ -902,7 +959,7 @@ function beginPointerTap(pointerId, point) {
     }
     rightClickSent = true;
     sendInput({ action: "rightClick", x: gesture.last.x, y: gesture.last.y });
-  }, 620);
+  }, LONG_PRESS_MS);
 }
 
 function beginPointerPinch() {
@@ -941,7 +998,15 @@ function updatePointerPinch() {
   gesture.lastCenter = middle;
 }
 
+function shouldIgnorePointerEvent(event) {
+  return event.pointerType === "touch" && USE_TOUCH_EVENTS;
+}
+
 function handlePointerDown(event) {
+  if (shouldIgnorePointerEvent(event)) {
+    return;
+  }
+
   if (event.pointerType === "mouse") {
     handleMouseDown(event);
     return;
@@ -962,6 +1027,10 @@ function handlePointerDown(event) {
 }
 
 function handlePointerMove(event) {
+  if (shouldIgnorePointerEvent(event)) {
+    return;
+  }
+
   if (event.pointerType === "mouse") {
     handleMouseMove(event);
     return;
@@ -976,17 +1045,9 @@ function handlePointerMove(event) {
   activePointers.set(event.pointerId, point);
 
   if (activePointers.size === 1 && gesture?.type === "pointer" && gesture.pointerId === event.pointerId) {
-    const moved = distance(gesture.start, point);
-    if (moved > 10) {
-      clearLongPress();
-    }
-
-    const now = performance.now();
-    if (now - lastMoveSentAt > 24) {
-      sendInput({ action: "move", x: point.x, y: point.y });
-      lastMoveSentAt = now;
-    }
-    gesture.last = point;
+    updateSinglePointerGesture(point, event.pointerId);
+  } else if (activePointers.size === 1 && gesture?.type === "pan" && gesture.pointerId === event.pointerId) {
+    updateViewportPan(point, event.pointerId);
   } else if (activePointers.size >= 2) {
     clearLongPress();
     updatePointerPinch();
@@ -994,6 +1055,10 @@ function handlePointerMove(event) {
 }
 
 function finishPointer(event, { canceled = false } = {}) {
+  if (shouldIgnorePointerEvent(event)) {
+    return;
+  }
+
   if (event.pointerType === "mouse") {
     if (canceled) {
       handleMouseCancel(event);
@@ -1010,13 +1075,8 @@ function finishPointer(event, { canceled = false } = {}) {
   event.preventDefault();
   const point = eventPoint(event);
 
-  if (!canceled && gesture?.type === "pointer" && gesture.pointerId === event.pointerId && activePointers.size === 1) {
-    gesture.last = point;
-    const duration = performance.now() - gesture.startTime;
-    const moved = distance(gesture.start, gesture.last);
-    if (!rightClickSent && duration < 520 && moved < 12) {
-      sendInput({ action: "click", x: point.x, y: point.y });
-    }
+  if (!canceled && activePointers.size === 1) {
+    finishSinglePointerGesture(point, event.pointerId);
   }
 
   activePointers.delete(event.pointerId);
@@ -1087,7 +1147,7 @@ function handleMouseUp(event) {
   const point = eventPoint(event);
   mouseGesture.last = point;
   const moved = distance(mouseGesture.start, mouseGesture.last);
-  if (moved < 12) {
+  if (moved < TAP_MAX_MOVE_PX) {
     sendInput({ action: "click", x: point.x, y: point.y });
   }
   mouseGesture = null;
@@ -1210,12 +1270,18 @@ window.screen?.orientation?.addEventListener?.("change", () => {
 document.addEventListener("fullscreenchange", handleFullscreenChange);
 document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
 document.addEventListener("visibilitychange", recoverActiveSession);
+if (USE_TOUCH_EVENTS) {
+  screen.addEventListener("touchstart", handleTouchStart, { passive: false });
+  screen.addEventListener("touchmove", handleTouchMove, { passive: false });
+  screen.addEventListener("touchend", handleTouchEnd, { passive: false });
+  screen.addEventListener("touchcancel", handleTouchEnd, { passive: false });
+}
 if (USE_POINTER_EVENTS) {
   screen.addEventListener("pointerdown", handlePointerDown);
   screen.addEventListener("pointermove", handlePointerMove);
   screen.addEventListener("pointerup", handlePointerUp);
   screen.addEventListener("pointercancel", handlePointerCancel);
-} else {
+} else if (!USE_TOUCH_EVENTS) {
   screen.addEventListener("touchstart", handleTouchStart, { passive: false });
   screen.addEventListener("touchmove", handleTouchMove, { passive: false });
   screen.addEventListener("touchend", handleTouchEnd, { passive: false });
